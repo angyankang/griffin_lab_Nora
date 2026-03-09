@@ -1,0 +1,20 @@
+2026-03-09 08:20:18,499 INFO    MainThread:18220 [wandb_setup.py:_flush():81] Current SDK version is 0.24.2
+2026-03-09 08:20:18,499 INFO    MainThread:18220 [wandb_setup.py:_flush():81] Configure stats pid to 18220
+2026-03-09 08:20:18,500 INFO    MainThread:18220 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-03-09 08:20:18,500 INFO    MainThread:18220 [wandb_init.py:setup_run_log_directory():717] Logging user logs to C:\Users\yankang.ang\Documents\GitHub\nora_griffin\lerobot_training\wandb\run-20260309_082018-66qfcewn\logs\debug.log
+2026-03-09 08:20:18,500 INFO    MainThread:18220 [wandb_init.py:setup_run_log_directory():718] Logging internal logs to C:\Users\yankang.ang\Documents\GitHub\nora_griffin\lerobot_training\wandb\run-20260309_082018-66qfcewn\logs\debug-internal.log
+2026-03-09 08:20:18,500 INFO    MainThread:18220 [wandb_init.py:init():844] calling init triggers
+2026-03-09 08:20:18,500 INFO    MainThread:18220 [wandb_init.py:init():849] wandb.init called with sweep_config: {}
+config: {'_wandb': {}}
+2026-03-09 08:20:18,500 INFO    MainThread:18220 [wandb_init.py:init():892] starting backend
+2026-03-09 08:20:22,078 INFO    MainThread:18220 [wandb_init.py:init():895] sending inform_init request
+2026-03-09 08:20:22,135 INFO    MainThread:18220 [wandb_init.py:init():903] backend started and connected
+2026-03-09 08:20:22,136 INFO    MainThread:18220 [wandb_init.py:init():973] updated telemetry
+2026-03-09 08:20:22,268 INFO    MainThread:18220 [wandb_init.py:init():997] communicating run to backend with 90.0 second timeout
+2026-03-09 08:20:26,342 INFO    MainThread:18220 [wandb_init.py:init():1042] starting run threads in backend
+2026-03-09 08:20:26,796 INFO    MainThread:18220 [wandb_run.py:_console_start():2529] atexit reg
+2026-03-09 08:20:26,796 INFO    MainThread:18220 [wandb_run.py:_redirect():2377] redirect: wrap_raw
+2026-03-09 08:20:26,796 INFO    MainThread:18220 [wandb_run.py:_redirect():2446] Wrapping output streams.
+2026-03-09 08:20:26,796 INFO    MainThread:18220 [wandb_run.py:_redirect():2469] Redirects installed.
+2026-03-09 08:20:26,800 INFO    MainThread:18220 [wandb_init.py:init():1082] run started, returning control to user process
+2026-03-09 08:20:26,801 INFO    MainThread:18220 [wandb_run.py:_config_callback():1404] config_cb None None {'per_device_batch_size': 1, 'learning_rate': 5e-05, 'gradient_accumulation_steps': 1, 'num_warmup_steps': 1000, 'max_train_steps': 60000, 'output_dir': './nora_finetune_object', 'resume_from_checkpoint': '', 'load_model_weights': None, 'lerobot_dataset_repo_id': None, 'lerobot_dataset_root': 'C:/Users/yankang.ang/Downloads/sample_dataset_lerobot_head_only/agibotworld', 'wandb_project_name': 'Nora VLA with LeRobotDataset', 'checkpoint_save_frequency': 20000, 'logging_frequency': 100, 'gradient_clipping': None, 'invert_grippler_action': True, 'image_keys': ['observation.images.head'], 'action_key': 'action', 'task_key': 'task', 'fps': 30, 'action_chunk_size': 50}

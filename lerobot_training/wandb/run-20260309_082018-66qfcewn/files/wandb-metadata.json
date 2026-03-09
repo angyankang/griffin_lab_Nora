@@ -1,0 +1,40 @@
+{
+  "os": "Windows-11-10.0.26200-SP0",
+  "python": "CPython 3.13.9",
+  "startedAt": "2026-03-09T00:20:18.496313Z",
+  "program": "C:\\Users\\yankang.ang\\Documents\\GitHub\\nora_griffin\\lerobot_training\\lerobot_training.py",
+  "codePath": "lerobot_training\\lerobot_training.py",
+  "codePathLocal": "lerobot_training.py",
+  "git": {
+    "remote": "https://github.com/griffinlabs-ai/nora.git",
+    "commit": "b49dd24e4963684214fc20f8ecc63200f4a4811a"
+  },
+  "email": "1812878273@qq.com",
+  "root": "C:\\Users\\yankang.ang\\Documents\\GitHub\\nora_griffin\\lerobot_training",
+  "host": "LIONS-LT287",
+  "executable": "C:\\Users\\yankang.ang\\Anaconda\\python.exe",
+  "cpu_count": 16,
+  "cpu_count_logical": 24,
+  "gpu": "NVIDIA GeForce RTX 5060 Laptop GPU",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "512116125696",
+      "used": "298457149440"
+    }
+  },
+  "memory": {
+    "total": "16869351424"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 5060 Laptop GPU",
+      "memoryTotal": "8546942976",
+      "cudaCores": 3328,
+      "architecture": "Blackwell",
+      "uuid": "GPU-bc1f9745-130a-c511-530c-4191a3525c04"
+    }
+  ],
+  "cudaVersion": "12.8",
+  "writerId": "tglnrhmpip720v17jxnj8jtagh4ebsp4"
+}

@@ -1,0 +1,11 @@
+transformers
+qwen_vl_utils
+torchvision
+accelerate
+wandb
+wheel
+scipy
+pillow
+safetensors
+tqdm
+lerobot==0.4.3
