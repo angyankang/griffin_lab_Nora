@@ -40,7 +40,7 @@ class Nora:
     # Define action token range and normalization bounds as class attributes
     # These are specific to the model's vocabulary and task
     _ACTION_TOKEN_MIN = 151665
-    _ACTION_TOKEN_MAX = 153712   #checked
+    _ACTION_TOKEN_MAX = 153712
 
 
     def __init__(

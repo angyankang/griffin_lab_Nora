@@ -129,7 +129,7 @@ class RLDSDataset(IterableDataset):
         rlds_config = dict(
             traj_transform_kwargs=dict(
                 window_size=1,                                      # If we wanted to feed / predict more than one step
-                future_action_window_size=50,                        # For action chunking
+                future_action_window_size=4,                        # For action chunking
                 skip_unlabeled=True,                                # Skip trajectories without language labels
                 goal_relabeling_strategy="uniform",                 # Goals are currently unused
             ),

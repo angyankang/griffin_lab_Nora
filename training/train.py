@@ -10,7 +10,7 @@ from torch.utils.data import Dataset, DataLoader
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from transformers import AutoProcessor, PreTrainedTokenizerBase, Qwen3VLForConditionalGeneration
+from transformers import AutoProcessor, PreTrainedTokenizerBase, Qwen2_5_VLForConditionalGeneration
 from transformers import SchedulerType, get_scheduler
 from datasets import RLDSDataset, RLDSBatchTransform
 from qwen_vl_utils import process_vision_info
@@ -25,11 +25,11 @@ logger = get_logger(__name__)
 class TrainingConfig:
     def __init__(
         self,
-        per_device_batch_size: int = 16,   # 1
+        per_device_batch_size: int = 16,
         learning_rate: float = 5e-5,
-        gradient_accumulation_steps: int = 2,   #1
+        gradient_accumulation_steps: int = 2,
         num_warmup_steps: int = 1000,
-        max_train_steps: int = 100000,    #60000
+        max_train_steps: int = 100000,
         output_dir: str = '/your_output',
         resume_from_checkpoint: str = '',
         load_model_weights: Optional[str] = None,
@@ -163,30 +163,6 @@ def load_model_and_processor(config: TrainingConfig, accelerator: Accelerator) -
         accelerator.print("Pretrained weights loaded.")
 
     return model, processor, fast_tokenizer
-
-# # --- 3. Model Initialization ---
-# def load_model_and_processor(config: TrainingConfig, accelerator: Accelerator):
-#     # 1. 直接指向 Qwen3 官方库
-#     model_id = "declare-lab/nora-long" 
-#     processor = AutoProcessor.from_pretrained(model_id)
-    
-#     # 2. 升级架构类（假设 Qwen3 类名为 Qwen3VL...）
-#     model = Qwen3VLForConditionalGeneration.from_pretrained(
-#         model_id,
-#         torch_dtype=torch.bfloat16,
-#         attn_implementation="flash_attention_2"
-#     )
-    
-#     # 3. 底层修改：不调用原有 Nora，手动扩展动作 Token
-#     # 这里是实现“不调原有模型”又能做动作预测的关键
-#     num_action_tokens = 256 * 14 # 14DoF 离散化空间
-#     model.resize_token_embeddings(len(processor.tokenizer) + num_action_tokens)
-    
-#     # 4. 初始化 Fast Tokenizer 为 14DoF
-#     fast_tokenizer = AutoProcessor.from_pretrained("physical-intelligence/fast", trust_remote_code=True)
-#     fast_tokenizer.action_dim = 14
-    
-#     return model, processor, fast_tokenizer
 
 # --- 4. Training Loop ---
 def train(config: TrainingConfig):

@@ -8,126 +8,120 @@ if str(_root) not in sys.path:
 import math
 import os
 import logging
-from typing import Collection, List, Any, Optional
+from typing import List, Any, Optional
 from dataclasses import dataclass
 
 import torch
-from torch.utils.data import DataLoader, default_collate, Dataset, ConcatDataset
+from torch.utils.data import DataLoader, default_collate
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
-from transformers import AutoProcessor, AutoModelForCausalLM
+
+# --- Updated Qwen3 Imports ---
+from transformers import AutoProcessor
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 from transformers import get_scheduler
 
 import lerobot.processor
-import lerobot.datasets.utils
-from lerobot.configs.types import  NormalizationMode, PipelineFeatureType
+from lerobot.configs.types import  PipelineFeatureType
 from qwen_vl_utils import process_vision_info
 import numpy as np
 from tqdm import tqdm
 
 import torchvision
-from utils.skip_episodes_lerobot_dataset import SkipEpisodesLeRobotDataset
+
+from utils.data_loading import load_dataset
 
 logger = get_logger(__name__)
 
 # --- 1. Configuration ---
+@dataclass
 class TrainingConfig:
-    def __init__(
-        self,
-        per_device_batch_size: int = 1,  ##训练时候修改
-        learning_rate: float = 5e-5,
-        gradient_accumulation_steps: int = 16,   ##修改
-        num_warmup_steps: int = 1000,
-        max_epochs: int = 5,
-        output_dir: str = './nora_finetune_object',
-        resume_from_checkpoint: str = '',
-        load_model_weights: Optional[str] = None,
-        lerobot_dataset_repo_id: str | None = None,
-        lerobot_dataset_root: str = "C:/Users/yankang.ang/Downloads/sample_dataset_lerobot_head_only/agibotworld",
-        wandb_project_name: str = "Nora VLA with LeRobotDataset",
-        checkpoint_save_frequency: int = 20000,
-        logging_frequency: int = 100,
-        gradient_clipping: Optional[float] = None,
-        invert_grippler_action: bool = True,
-        dataloader_num_workers: int = 0,
-        # 【显式指定 Qwen 3.5】
-        model_id: str = "Qwen/Qwen3.5-4B", 
-        action_vocab_size: int = 1024,
-    ):
-        self.per_device_batch_size = per_device_batch_size
-        self.learning_rate = learning_rate
-        self.gradient_accumulation_steps = gradient_accumulation_steps
-        self.num_warmup_steps = num_warmup_steps
-        self.max_epochs = max_epochs
-        self.output_dir = output_dir
-        self.resume_from_checkpoint = resume_from_checkpoint
-        self.load_model_weights = load_model_weights
-        self.lerobot_dataset_repo_id = lerobot_dataset_repo_id
-        self.lerobot_dataset_root = lerobot_dataset_root
-        self.wandb_project_name = wandb_project_name
-        self.checkpoint_save_frequency = checkpoint_save_frequency
-        self.logging_frequency = logging_frequency
-        self.gradient_clipping = gradient_clipping
-        self.invert_grippler_action = invert_grippler_action
-        self.dataloader_num_workers = dataloader_num_workers
-        self.model_id = model_id
-        self.action_vocab_size = action_vocab_size
-        self.image_keys = (
-            'observation.images.head',
-        )
-        self.action_key = 'action'
-        self.task_key = 'task'
-        self.fps = 30
-        self.action_chunk_size = 50
-
-# --- 原生 Action Tokenizer (替代报错的 FAST 库) ---
-def native_action_tokenizer(action_tensor: torch.Tensor, vocab_size: int = 1024) -> List[List[str]]:
-    """
-    直接将连续动作 [0, 1] 映射为离散的 string token 列表，完全绕过 HF 依赖。
-    action_tensor shape: [batch_size, chunk_size, action_dim]
-    """
-    clamped_actions = torch.clamp(action_tensor, 0.0, 0.9999)
-    discrete_actions = (clamped_actions * vocab_size).int()
-    
-    result = []
-    for batch_idx in range(discrete_actions.shape[0]):
-        # 将每个 batch 下的 chunk 和 dim 展平为一维 token 序列
-        tokens = discrete_actions[batch_idx].flatten().tolist()
-        result.append([str(t) for t in tokens])
-    return result
-
-def map_fast_token_to_vlm_action(tokens: List[str]) -> str:
-    return ''.join([f"<robot_action_{token}>" for token in tokens])
+    per_device_batch_size: int = 256
+    learning_rate: float = 5e-5
+    gradient_accumulation_steps: int = 1
+    num_warmup_steps: int = 1000
+    max_epochs: int = 5
+    output_dir: str = './nora_finetune_object'
+    resume_from_checkpoint: str = ''
+    load_model_weights: Optional[str] = None
+    agibot_world_root: str = "data/agibot/tasks"
+    galaxea_open_world_ds_root: str = "data/galaxea/subsets"
+    wandb_project_name: str = "Nora VLA with LeRobotDataset"
+    checkpoint_save_frequency: int = 20000
+    logging_frequency: int = 100
+    gradient_clipping: Optional[float] = None
+    dataloader_num_workers: int = 4
+    image_augmentation: bool = True
+    action_chunk_size: int = 50
+    model_id: str = "Qwen/Qwen3-VL-4B-Instruct" 
+    action_vocab_size: int = 2048
 
 # --- 2. Data Loading and Preprocessing ---
-def load_and_prepare_dataset(config: TrainingConfig) -> tuple[Dataset, dict[str, dict[str, np.ndarray]]]:
-    delta_timestamps = [i / config.fps for i in range(-1, config.action_chunk_size)]
-    delta_timestamps_dict = {
-        "actions.joint.position": delta_timestamps,
-        "actions.effector.position": delta_timestamps,
-    }
-    task_roots = list(pathlib.Path(config.lerobot_dataset_root).glob("task_*"))
-    dataset = ConcatDataset([
-        SkipEpisodesLeRobotDataset(task_root.name, root=task_root, delta_timestamps=delta_timestamps_dict)
-        for task_root in tqdm(task_roots, desc="Loading AgiBot World Beta datasets")
-    ])
-    
-    raw_norm_stats = lerobot.datasets.utils.cast_stats_to_numpy(
-        lerobot.datasets.utils.load_json(pathlib.Path(config.lerobot_dataset_root) / 'norm_stats.json')
-    )['norm_stats']
-    
-    norm_stats = {
-        "action": {
-            "min": np.append(np.insert(raw_norm_stats['actions.joint.position']['q01'], 7, 0), 0),
-            "max": np.append(np.insert(raw_norm_stats['actions.joint.position']['q99'], 7, 1), 1),
-        }
-    }
-    return dataset, norm_stats
+def load_agibot_world_dataset(
+    root: str,
+    canonical_action_chunk_size: int,
+    use_image_augmentation: bool,
+):
+    return load_dataset(
+        root,
+        ("actions.joint.position", "actions.effector.position"),
+        canonical_action_chunk_size,
+        canonical_action_chunk_size,
+        use_image_augmentation,
+        raw_fps = 30,
+        aspect_ratio = 4/3,
+        instance_transform = agibot_world_to_nora_instance,
+        norm_stats_transform = lambda norm_stats: {
+            "action": {
+                "q01": np.append(np.insert(norm_stats['actions.joint.position']['q01'], 7, 0), 0),
+                "q99": np.append(np.insert(norm_stats['actions.joint.position']['q99'], 7, 1), 1),
+            }
+        },
+    )
 
-def agibot_world_to_nora_instance(batch: dict[str, Any], img_keys: Collection[str]):
-    images = {k: batch[k] for k in img_keys}
-    prev_dim_sizes = batch['actions.joint.position'].shape[:2]
+def load_galaxea_dataset(
+    root: str,
+    canonical_action_chunk_size: int,
+    use_image_augmentation: bool,
+):
+    assert canonical_action_chunk_size % 2 == 0
+    return load_dataset(
+        root,
+        ("action.left_arm", "action.left_gripper", "action.right_arm", "action.right_gripper"),
+        canonical_action_chunk_size // 2,
+        canonical_action_chunk_size,
+        use_image_augmentation,
+        raw_fps = 15,
+        aspect_ratio = 16/9,
+        instance_transform = galaxea_to_nora_instance,
+        norm_stats_transform = lambda norm_stats:
+            {
+                "action": {
+                    "q01": np.concatenate([
+                        norm_stats['action.left_arm']['q01'],
+                        np.array([-1.0, 0.0]),
+                        norm_stats['action.right_arm']['q01'],
+                        np.array([-1.0, 0.0]),
+                    ]),
+                    "q99": np.concatenate([
+                        norm_stats['action.left_arm']['q99'],
+                        np.array([1.0, 1.0]),
+                        norm_stats['action.right_arm']['q99'],
+                        np.array([1.0, 1.0]),
+                    ]),
+                }
+            },
+    )
+
+def agibot_world_to_nora_instance(batch: dict[str, Any]):
+    """
+    Convert from raw AgiBot World dataset format to format that is ready to be converted to `EnvTransition`:
+    - Merge relevant actions into `action`, discarding other actions.
+    - Merge relevant states into `observation.state`, discarding other states.
+    - Invert the gripper action by 1-x.
+    """
+    prev_dim_sizes = batch['actions.joint.position'].shape[:-1]
     action = torch.cat(
         [
             batch['actions.joint.position'].view(*prev_dim_sizes, 2, 7),
@@ -135,38 +129,93 @@ def agibot_world_to_nora_instance(batch: dict[str, Any], img_keys: Collection[st
         ],
         dim = -1
     ).view(*prev_dim_sizes, 16)
-    batch = {k: v for k, v in batch.items() if not k.startswith('actions.') and not k.startswith('observation.')}
-    batch.update(images)
+    state = torch.cat(
+        [
+            batch['observation.states.joint.position'].view(2, 7),
+            # Effector position below is only used for its shape, the values should be unused through the
+            # delta transform mask. The values are in meters rather than [0, 1] so not actually comparable.
+            batch['observation.states.effector.position'].view(2, 1),
+        ],
+        dim = -1
+    ).view(16)
+    batch = {k: v for k, v in batch.items() if not k.startswith('actions.') and not k.startswith('observation.states.')}
     batch['action'] = action
+    batch['observation.state'] = state
+    batch['action_dim_is_pad'] = torch.zeros(action.shape[-1], dtype=torch.bool)
+    batch['info'] = {"embodiment_prompt": "AgiBot G1 with 2 grippers"}
     return batch
 
-@dataclass
-@lerobot.processor.ProcessorStepRegistry.register("abs2delta_action_processor")
-class Abs2DeltaActionProcessorStep(lerobot.processor.PolicyActionProcessorStep):
-    mask: torch.Tensor
+def galaxea_to_nora_instance(batch: dict[str, Any]):
+    """
+    Convert from raw Galaxea Open World Dataset format to format that is ready to be converted to `EnvTransition`:
+    - Merge relevant actions into `action`, discarding other actions.
+    - Merge relevant states into `observation.state`, discarding other states.
+    """
+    zero_padding = torch.zeros((*batch['action.left_arm'].shape[:-1], 1), dtype=batch['action.left_arm'].dtype)
+    action = torch.cat(
+        [
+            batch['action.left_arm'],
+            zero_padding,
+            batch['action.left_gripper'].unsqueeze(-1),
+            batch['action.right_arm'],
+            zero_padding,
+            batch['action.right_gripper'].unsqueeze(-1),
+        ],
+        dim = -1
+    )
+    zero_padding = torch.zeros((1,), dtype=batch['action.left_arm'].dtype)
+    state = torch.cat(
+        [
+            batch['observation.state.left_arm'],
+            zero_padding,
+            batch['observation.state.left_gripper'].unsqueeze(-1),
+            batch['observation.state.right_arm'],
+            zero_padding,
+            batch['observation.state.right_gripper'].unsqueeze(-1),
+        ],
+        dim = -1
+    )
+    batch = {k: v for k, v in batch.items() if not k.startswith('action.') and not k.startswith('observation.state.')}
+    batch['action'] = action
+    batch['observation.state'] = state
+    batch['action_dim_is_pad'] = torch.tensor(
+        [False, False, False, False, False, False, True, False] * 2,
+    )
+    batch['info'] = {"embodiment_prompt": "Galaxea R1 Lite"}
+    # rename image keys, drop right head image
+    batch['observation.images.head'] = batch['observation.images.head_rgb']
+    batch['observation.images.hand_left'] = batch['observation.images.left_wrist_rgb']
+    batch['observation.images.hand_right'] = batch['observation.images.right_wrist_rgb']
+    del batch['observation.images.head_rgb']
+    del batch['observation.images.head_right_rgb']
+    del batch['observation.images.left_wrist_rgb']
+    del batch['observation.images.right_wrist_rgb']
+    return batch
 
-    def action(self, action):
-        assert self.mask.shape[-1] == action.shape[-1]
-        future_actions = action[...,1:,:]
-        deltas = future_actions - action[...,:-1,:]
-        return torch.where(self.mask.expand(future_actions.shape), deltas, future_actions)
-
-    def transform_features(self, features):
-        old_shape = features['ACTION']['action'].shape
-        features['ACTION'].shape = old_shape[:-2] + (old_shape[-2] - 1, old_shape[-1]) 
-        return features
+def map_fast_token_to_vlm_action(tokens: List[str]) -> str:
+    """Maps fast action tokens to the VLM action format."""
+    return ''.join([f"<robot_action_{token}>" for token in tokens])
 
 @dataclass
 @lerobot.processor.ProcessorStepRegistry.register("nora_processor")
 class NoraPolicyProcessorStep(lerobot.processor.ProcessorStep):
-    config: TrainingConfig
+    # Added to accept Qwen3 config and processor
+    config: TrainingConfig 
     transformer_processor: Any 
+    action_token_min: int = -1
+    action_token_max: int = -1
+
+    IMAGE_KEYS = (
+        'observation.images.head',
+        'observation.images.hand_left',
+        'observation.images.hand_right',
+    )
 
     def __post_init__(self):
-        # 【彻底剥离 FAST 分词器依赖】
-        self.transformer_processor.tokenizer.padding_side = 'left'
-
-        # 动态获取 Qwen3.5 中 Action Token 的 ID 范围
+        self.fast_tokenizer = AutoProcessor.from_pretrained(
+            "physical-intelligence/fast", trust_remote_code=True
+        )
+        # Dynamically calculate Action Token range to replace the original hardcoded values (151665 ~ 153712)
         action_tokens = [f"<robot_action_{i}>" for i in range(self.config.action_vocab_size)]
         action_ids = self.transformer_processor.tokenizer.convert_tokens_to_ids(action_tokens)
         action_ids = [id for id in action_ids if id is not None and id != self.transformer_processor.tokenizer.unk_token_id]
@@ -174,25 +223,28 @@ class NoraPolicyProcessorStep(lerobot.processor.ProcessorStep):
         if action_ids:
             self.action_token_min = min(action_ids)
             self.action_token_max = max(action_ids)
-            logger.info(f"成功定位 Qwen3.5 Action Token 范围: {self.action_token_min} 到 {self.action_token_max}")
         else:
-            raise ValueError("在 Qwen3.5 词表中未找到 Action Tokens！")
+            raise ValueError("Action Tokens not found in the Qwen3 vocabulary! Please ensure they were injected during the model loading phase.")
 
     def __call__(self, transition: lerobot.processor.EnvTransition) -> lerobot.processor.EnvTransition:
+        # list of lists, shape (batch_size, n_keys)
         per_sample_images = [
             [
                 torchvision.transforms.functional.to_pil_image(img)
                 for img in image_tuple
             ]
-            for image_tuple in zip(*(transition['observation'][k] for k in self.config.image_keys))
+            for image_tuple in zip(*(transition['observation'][k] for k in self.IMAGE_KEYS))
         ]
 
-        action = transition['action']
-        lang = transition['complementary_data']['task']
-        
-        # 【使用纯原生 Python 函数处理动作离散化】
-        native_tokens_list = native_action_tokenizer(action.cpu(), vocab_size=self.config.action_vocab_size)
-        vlm_action = [map_fast_token_to_vlm_action(ft) for ft in native_tokens_list]
+        fast_tokens = []
+        for i in range(transition['action'].shape[0]):
+            action = transition['action'][i]
+            action = action[:, transition['complementary_data']['action_dim_is_pad'][i].logical_not()]
+            fast_tokens.extend(self.fast_tokenizer(action.cpu()))
+
+        vlm_action = [map_fast_token_to_vlm_action(ft) for ft in fast_tokens]
+        tasks = transition['complementary_data']['task']
+        embodiment_prompts = transition['info']['embodiment_prompt']
 
         messages = [
             [
@@ -203,7 +255,7 @@ class NoraPolicyProcessorStep(lerobot.processor.ProcessorStep):
                             {"type": "image", "image": img, "resized_height": 224, "resized_width": 224}
                             for img in imgs
                         ),
-                        {"type": "text", "text": l},
+                        {"type": "text", "text": f"[embodiment: {embodiment}] {task}"},
                     ],
                 },
                 {
@@ -213,7 +265,7 @@ class NoraPolicyProcessorStep(lerobot.processor.ProcessorStep):
                     ],
                 }
             ]
-            for imgs, l, act in zip(per_sample_images, lang, vlm_action)
+            for imgs, task, embodiment, act in zip(per_sample_images, tasks, embodiment_prompts, vlm_action)
         ]
 
         text = self.transformer_processor.apply_chat_template(
@@ -231,6 +283,7 @@ class NoraPolicyProcessorStep(lerobot.processor.ProcessorStep):
         
         labels = batch_input['input_ids'].clone()
 
+        # Use dynamically calculated action_token_min/max
         for i in range(labels.size(0)):
             seq = labels[i]
             mask_seq = (seq >= self.action_token_min) & (seq <= self.action_token_max)
@@ -252,46 +305,32 @@ class NoraPolicyProcessorStep(lerobot.processor.ProcessorStep):
             PipelineFeatureType.OBSERVATION: {},
         }
 
-def make_policy_processor(
-        config: TrainingConfig,
-        norm_stats: dict[str, dict[str, np.ndarray]],
-        transformer_processor: Any
-) -> lerobot.processor.PolicyProcessorPipeline:
-    norm_map = {
-        'ACTION': NormalizationMode.MIN_MAX,
-    }
-
+def make_policy_processor(config: TrainingConfig, transformer_processor: Any) -> lerobot.processor.PolicyProcessorPipeline:
+    # Pass config and processor to the step
     return lerobot.processor.PolicyProcessorPipeline(
-        steps = [
-            Abs2DeltaActionProcessorStep(
-                mask = torch.tensor(
-                    [
-                        True, True, True, True, True, True, True, False,
-                        True, True, True, True, True, True, True, False,
-                    ],
-                    dtype=torch.bool,
-                ),
-            ),
-            lerobot.processor.NormalizerProcessorStep({}, norm_map , norm_stats),
-            NoraPolicyProcessorStep(config, transformer_processor),
-        ],
-        to_transition=lambda batch:
-            lerobot.processor.converters.batch_to_transition(agibot_world_to_nora_instance(batch, config.image_keys)),
-        to_output=lerobot.processor.converters.transition_to_batch,
+        steps = [NoraPolicyProcessorStep(config=config, transformer_processor=transformer_processor)],
+        to_output=lambda tr: tr['complementary_data'],
     )
 
+
 # --- 3. Model Initialization ---
-def load_model_and_processor(config: TrainingConfig, accelerator: Accelerator, processor: Any):
-    # 【显式调用基础大模型类，通吃所有 Qwen 3.5 变体】
-    model = AutoModelForCausalLM.from_pretrained(
+def load_model_and_processor(config: TrainingConfig, accelerator: Accelerator):
+    """Loads Qwen3, its processor, and injects action tokens."""
+    transformer_processor = AutoProcessor.from_pretrained(config.model_id, trust_remote_code=True)
+    transformer_processor.tokenizer.padding_side = 'left'
+
+    model = Qwen3VLForConditionalGeneration.from_pretrained(
         config.model_id,
         torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa", # 避免 flash_attn 在 Windows 上的编译报错
+        attn_implementation="flash_attention_2",
         trust_remote_code=True
     )
 
-    model.resize_token_embeddings(len(processor.tokenizer))
-    accelerator.print(f"成功将 Qwen3.5 模型词表扩充至: {len(processor.tokenizer)}")
+    # Inject action tokens
+    action_tokens = [f"<robot_action_{i}>" for i in range(config.action_vocab_size)]
+    transformer_processor.tokenizer.add_tokens(action_tokens, special_tokens=True)
+    model.resize_token_embeddings(len(transformer_processor.tokenizer))
+    accelerator.print(f"Added {len(action_tokens)} action tokens to Qwen3 vocabulary.")
 
     if config.load_model_weights:
         tensors = {}
@@ -302,27 +341,33 @@ def load_model_and_processor(config: TrainingConfig, accelerator: Accelerator, p
         model.load_state_dict(tensors, strict=False)
         accelerator.print("Pretrained weights loaded.")
 
-    return model
+    return model, transformer_processor
 
 # --- 4. Training Loop ---
 def train(config: TrainingConfig):
-    accelerator = Accelerator(gradient_accumulation_steps=config.gradient_accumulation_steps, log_with="wandb")
+    """Main training loop."""
+    accelerator = Accelerator(gradient_accumulation_steps=config.gradient_accumulation_steps,log_with="wandb")
     accelerator.dataloader_config.dispatch_batches = False
     logger.info(accelerator.state, main_process_only=False)
 
     accelerator.init_trackers(config.wandb_project_name, config=config)
 
-    # 【直接初始化 Qwen 3.5 的 Processor】
-    transformer_processor = AutoProcessor.from_pretrained(config.model_id, trust_remote_code=True)
-    action_tokens = [f"<robot_action_{i}>" for i in range(config.action_vocab_size)]
-    transformer_processor.tokenizer.add_tokens(action_tokens, special_tokens=True)
-    accelerator.print(f"成功向 Qwen 3.5 的词表中注入 {len(action_tokens)} 个动作 Token。")
-
-    model = load_model_and_processor(config, accelerator, transformer_processor)
+    # Unpack both model and processor
+    model, transformer_processor = load_model_and_processor(config, accelerator)
 
     with accelerator.main_process_first():
-        dataset, norm_stats = load_and_prepare_dataset(config)
-        policy_preprocessor = make_policy_processor(config, norm_stats, transformer_processor)
+        agibot_world = load_agibot_world_dataset(
+            root = config.agibot_world_root,
+            canonical_action_chunk_size = config.action_chunk_size,
+            use_image_augmentation = config.image_augmentation,
+        )
+        galaxea_open_world_ds = load_galaxea_dataset(
+            root = config.galaxea_open_world_ds_root,
+            canonical_action_chunk_size = config.action_chunk_size,
+            use_image_augmentation = config.image_augmentation,
+        )
+        dataset = agibot_world + galaxea_open_world_ds
+        policy_preprocessor = make_policy_processor(config, transformer_processor)
 
     train_dataloader = DataLoader(
         dataset,
@@ -360,7 +405,7 @@ def train(config: TrainingConfig):
         accelerator.print(f"Resumed from local checkpoint: {config.resume_from_checkpoint}")
 
     total_batch_size = config.per_device_batch_size * accelerator.num_processes * config.gradient_accumulation_steps
-    logger.info("***** Running Qwen 3.5 Training *****")
+    logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(dataset)}")
     logger.info(f"  Num steps = {max_train_steps}")
     logger.info(f"  Instantaneous batch size per device = {config.per_device_batch_size}")
@@ -375,7 +420,17 @@ def train(config: TrainingConfig):
         for batch in train_dataloader:
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
-                outputs = model(**batch)
+                
+                # Filter dictionary keys to prevent unexpected kwargs to Qwen3
+                model_inputs = {
+                    'input_ids': batch['input_ids'],
+                    'attention_mask': batch['attention_mask'],
+                    'pixel_values': batch['pixel_values'],
+                    'image_grid_thw': batch['image_grid_thw'],
+                    'labels': batch['labels']
+                }
+                
+                outputs = model(**model_inputs)
                 loss = outputs.loss
 
                 accelerator.backward(loss)
@@ -413,6 +468,7 @@ def train(config: TrainingConfig):
     if accelerator.is_main_process:
         checkpoint_path = os.path.join(config.output_dir, f"steps_{completed_steps}")
         logger.info(f"Training finished. Final checkpoint saved at {checkpoint_path}")
+
 
 def main():
     config = TrainingConfig()
