@@ -1,18 +1,18 @@
 from dataclasses import dataclass
-from typing import Callable, Generic, Iterable
+import json
+from typing import Callable, Generic, Iterable, Mapping
 from scipy.interpolate import CubicSpline
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, default_collate
 from typing import Any
 import pathlib
 import numpy as np
-import torchvision.transforms as T_v2
 from lerobot.configs.types import NormalizationMode
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 import lerobot.processor
 import lerobot.datasets.utils
 from torch.utils.data import ConcatDataset
 from tqdm import tqdm
-from .skip_episodes_lerobot_dataset import SkipEpisodesLeRobotDataset
 
 from lerobot.processor.pipeline import PolicyProcessorPipeline, TOutput
 
@@ -111,16 +111,31 @@ class Abs2DeltaActionProcessorStep(lerobot.processor.ProcessorStep):
         return features
 
 
+def load_lerobot_dataset_skip_dirty_episodes(
+    repo_id: str,
+    root: str | pathlib.Path | None = None,
+    episodes: list[int] | None = None,
+    *args,
+    **kwargs,
+) -> PreprocessedDataset:
+    if episodes is None and root is not None:
+        removed_episodes_path = pathlib.Path(root) / 'meta/removed_episodes.json'
+        if removed_episodes_path.exists():
+            total_episodes = lerobot.datasets.utils.load_info(root)['total_episodes']
+            with open(removed_episodes_path, 'r') as f:
+                removed_episodes = json.load(f)['dirty_episodes']
+            episodes = [i for i in range(total_episodes) if i not in removed_episodes]
+    return LeRobotDataset(repo_id, root, episodes, *args, **kwargs)
+
 def load_dataset(
-    root: str,
+    root: str | pathlib.Path,
     action_keys: Iterable[str],
     load_action_chunk_size: int,
     canonical_action_chunk_size: int,
-    use_image_augmentation: bool,
     raw_fps: int,
-    aspect_ratio: float,
     instance_transform: Callable[[dict[str, Any]], dict[str, Any]],
     norm_stats_transform: Callable[[dict[str, dict[str, np.ndarray]]], dict[str, dict[str, np.ndarray]]],
+    num_frames: int = 1, # [ADD] Accept num_frames from the training script
 ) -> PreprocessedDataset:
     """
     Loads preprocessed dataset. The following preprocessing steps are applied:
@@ -131,37 +146,50 @@ def load_dataset(
     """
     root = pathlib.Path(root)
 
-    delta_timestamps = [i / raw_fps for i in range(load_action_chunk_size)]
+    # 1. Action timestamps (Future prediction chunk)
+    action_delta_timestamps = [i / raw_fps for i in range(load_action_chunk_size)]
     delta_timestamps = {
-        action_key: delta_timestamps
+        action_key: action_delta_timestamps
         for action_key in action_keys
     }
-    if use_image_augmentation:
-        image_transforms = T_v2.Compose([
-            # Note that the dlimp RandomResizedCrop used by the original RLDS dataloader
-            # seems to handle `ratio` differently: ratio is measured in normalized coordinates (between 0.0 and 1.0)
-            # hence ratio=(1.0, 1.0) would crop at the same aspect ratio as the original image
-            # (https://github.com/kvablack/dlimp/blob/5edaa4691567873d495633f2708982b42edf1972/dlimp/augmentations.py#L6)
-            # With torchvision to crop at the original aspect ratio, we need to pass the ratio of actual pixels
-            T_v2.RandomResizedCrop(size=(224, 224), scale=(0.9, 0.9), ratio=(aspect_ratio, aspect_ratio)),
-            T_v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
-        ])
-    else:
-        image_transforms = None
-    task_roots = [p for p in root.iterdir() if p.is_dir()]
-    dataset = ConcatDataset([
-        SkipEpisodesLeRobotDataset(
-            task_root.name,
-            root=task_root,
+    
+    task_roots = [p.parent.parent for p in root.rglob('info.json')]
+
+    # [ADD] 2. Image timestamps (Past observation history)
+    # We dynamically find the image keys from the first dataset to apply history frames
+    if task_roots and num_frames > 1:
+        # Instantiate a temporary dataset purely to extract feature keys safely
+        temp_ds = load_lerobot_dataset_skip_dirty_episodes(
+            repo_id=str(task_roots[0].relative_to(root)),
+            root=task_roots[0],
             delta_timestamps=delta_timestamps,
-            image_transforms=image_transforms,
+        )
+        
+        # Find all keys that represent images
+        image_keys = [k for k in temp_ds.features.keys() if 'image' in k.lower()]
+        
+        # Calculate timestamps for 5 past frames + 1 current frame (interval of 1 second)
+        # e.g., if num_frames=6, img_timestamps will be [-5.0, -4.0, -3.0, -2.0, -1.0, 0.0]
+        img_timestamps = [float(i - num_frames + 1) for i in range(num_frames)]
+        
+        # Apply the temporal window to all image streams
+        for img_k in image_keys:
+            delta_timestamps[img_k] = img_timestamps
+
+    dataset = ConcatDataset([
+        load_lerobot_dataset_skip_dirty_episodes(
+            task_root.relative_to(root),
+            root=task_root,
+            delta_timestamps=delta_timestamps, # This now contains both image history and action futures!
         )
         for task_root in tqdm(task_roots, desc="Loading datasets")
     ])
+    
     # Load and prepare normalization stats
     raw_norm_stats = lerobot.datasets.utils.cast_stats_to_numpy(
         lerobot.datasets.utils.load_json(root / 'delta_norm_stats.json')
     )['norm_stats']
+    
     # gripper min and max are currently hardcoded to 0 and 1.
     # if changing this to use other statistics, remember that gripper states are all transformed by 1-x,
     # so the stats would have to be transformed as well, and order reversed (e.g. q01 becomes 1-q99)
@@ -170,9 +198,11 @@ def load_dataset(
     norm_map = {
         'ACTION': NormalizationMode.QUANTILES,
     }
+    
     resample_step_if_necessary = [ResampleActionProcessorStep(
         target_chunk_size = canonical_action_chunk_size,
     )] if load_action_chunk_size != canonical_action_chunk_size else []
+    
     preprocessor = PolicyProcessorPipeline(
         steps = [
             Abs2DeltaActionProcessorStep(
@@ -194,3 +224,29 @@ def load_dataset(
     dataset = PreprocessedDataset(dataset, preprocessor)
 
     return dataset
+
+def collate_with_observation_image_lists(
+    examples: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """
+    Collate function that collates `observation.images.*` fields as lists rather than tensors.
+
+    This allows for heterogeneous image shapes in the batch.
+    """
+    images = [
+        {k: v for k, v in example.items() if k.startswith('observation.images.')}
+        for example in examples
+    ]
+    collated_images = {
+        k: [observation[k] for observation in images]
+        for k in images[0].keys()
+    }
+    no_images = [
+        {k: v for k, v in example.items() if not k.startswith('observation.images.')}
+        for example in examples
+    ]
+    collated = {
+        **collated_images,
+        **default_collate(no_images)
+    }
+    return collated
